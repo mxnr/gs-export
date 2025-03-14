@@ -216,6 +216,38 @@ def import_csv_to_sheet(service, spreadsheet_id, csv_file, retry_count=0):
         logger.error(f"\n{get_random_emoji(ERROR_EMOJIS)} Error processing {csv_file}: {e}")
         return False
 
+def update_summary_sheet(service, spreadsheet_id, csv_files, successful_imports):
+    """Updates the first sheet with summary of imported files and row counts."""
+    try:
+        # Get the first sheet's title
+        sheet_metadata = service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id
+        ).execute()
+        first_sheet_title = sheet_metadata['sheets'][0]['properties']['title']
+
+        # Prepare the summary data
+        summary_data = []
+        for csv_file in csv_files:
+            if csv_file in successful_imports:
+                sheet_name = os.path.splitext(csv_file)[0]
+                summary_data.append([
+                    sheet_name,
+                    f'=COUNTA(INDIRECT(A{len(summary_data) + 1}&"!A:A")) - 1'
+                ])
+
+        # Update the first sheet
+        if summary_data:
+            service.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id,
+                range=f'{first_sheet_title}!A1',
+                valueInputOption='USER_ENTERED',  # Required for formulas
+                body={'values': summary_data}
+            ).execute()
+            
+            logger.info(f"{get_random_emoji(SUCCESS_EMOJIS)} Added summary to the first sheet")
+    except Exception as e:
+        logger.error(f"\n{get_random_emoji(ERROR_EMOJIS)} Error updating summary: {e}")
+
 def main():
     logger.info(f"\n{get_random_emoji(WORKING_EMOJIS)} Starting up the CSV to Google Sheets importer...")
     
@@ -269,7 +301,7 @@ def main():
 
         logger.info(f"\n{get_random_emoji(WORKING_EMOJIS)} Starting to import CSV files...")
         
-        successful_imports = 0
+        successful_imports = []
         for index, csv_file in enumerate(csv_files, 1):
             working_emoji = get_random_emoji(WORKING_EMOJIS)
             logger.info(f"\n{working_emoji} Processing file {index} of {total_files}: {csv_file}")
@@ -281,16 +313,19 @@ def main():
             )
             
             if success:
-                successful_imports += 1
-                logger.info(f"{get_random_emoji(SUCCESS_EMOJIS)} Successfully imported {csv_file} ({successful_imports} of {total_files} done)")
+                successful_imports.append(csv_file)
+                logger.info(f"{get_random_emoji(SUCCESS_EMOJIS)} Successfully imported {csv_file} ({len(successful_imports)} of {total_files} done)")
             
             if index < len(csv_files):
                 time.sleep(FILE_DELAY)
         
+        # Update the first sheet with summary
+        update_summary_sheet(service, spreadsheet_id, csv_files, successful_imports)
+        
         logger.info(f"\n{get_random_emoji(SUCCESS_EMOJIS)} Import complete!")
-        logger.info(f"✓ Successfully imported {successful_imports} of {total_files} files")
-        if successful_imports < total_files:
-            logger.warning(f"✗ Failed to import {total_files - successful_imports} files")
+        logger.info(f"✓ Successfully imported {len(successful_imports)} of {total_files} files")
+        if len(successful_imports) < total_files:
+            logger.warning(f"✗ Failed to import {total_files - len(successful_imports)} files")
         logger.info(f"📊 Your spreadsheet is ready at: https://docs.google.com/spreadsheets/d/{spreadsheet_id}")
         
     except HttpError as error:
