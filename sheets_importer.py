@@ -1,29 +1,48 @@
-import os
-import pandas as pd
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-import pickle
-from tqdm import tqdm
-import time
-import random
-from datetime import datetime
+#!/usr/bin/env python3
+"""
+Google Sheets CSV Importer.
+This script imports CSV files into Google Sheets using the Google Sheets API.
+"""
+
+# Standard library imports
 import logging
+import os
+import pickle
+import random
 import stat
 import sys
+import time
 import warnings
+from datetime import datetime
+from typing import Any, Optional
 
-# Try to import local config, fall back to template if not found
+# Third-party imports
+import pandas as pd
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
+# Local imports
 try:
     from config import *
 except ImportError:
-    logger.error("config.py not found. Please copy config.template.py to config.py and update the values.")
+    print("config.py not found. Please copy config.template.py to config.py and update the values.")
     sys.exit(1)
 
-# Suppress the file_cache warning
-warnings.filterwarnings('ignore', message='file_cache is only supported with oauth2client<4.0.0')
+# Constants
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
+]
+
+CREDENTIALS_FILE = 'credentials.json'
+TOKEN_FILE = 'token.pickle'
+
+SUCCESS_EMOJIS = ['🎉', '✨', '🌟', '🚀', '💫', '🎯', '🌈']
+WORKING_EMOJIS = ['🔨', '⚙️', '🛠️', '🔧', '💪', '🤖', '🔄']
+ERROR_EMOJIS = ['😱', '🚨', '💥', '⚡', '🆘', '😅', '🤔']
 
 # Configure logging
 logging.basicConfig(
@@ -39,41 +58,54 @@ logger = logging.getLogger(__name__)
 # Disable unnecessary logging from google api client
 logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.ERROR)
 
-# If modifying these scopes, delete the file token.pickle.
-SCOPES = [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive'  # Added drive scope for copying spreadsheets
-]
+# Suppress the file_cache warning
+warnings.filterwarnings('ignore', message='file_cache is only supported with oauth2client<4.0.0')
 
-# File constants
-CREDENTIALS_FILE = 'credentials.json'
-TOKEN_FILE = 'token.pickle'
-
-# Fun emoji arrays for random selection
-SUCCESS_EMOJIS = ['🎉', '✨', '🌟', '🚀', '💫', '🎯', '🌈']
-WORKING_EMOJIS = ['🔨', '⚙️', '🛠️', '🔧', '💪', '🤖', '🔄']
-ERROR_EMOJIS = ['😱', '🚨', '💥', '⚡', '🆘', '😅', '🤔']
-
-def secure_file_permissions(filepath):
-    """Set secure permissions for sensitive files."""
+def secure_file_permissions(filepath: str) -> None:
+    """Set secure permissions for sensitive files.
+    
+    Args:
+        filepath: Path to the file to secure
+    """
     try:
         # Set file permissions to owner read/write only (600)
         os.chmod(filepath, stat.S_IRUSR | stat.S_IWUSR)
     except Exception as e:
         logger.warning(f"Could not set permissions for {filepath}: {e}")
 
-def get_random_emoji(emoji_list):
+def get_random_emoji(emoji_list: list[str]) -> str:
+    """Get a random emoji from the provided list.
+    
+    Args:
+        emoji_list: List of emoji strings to choose from
+        
+    Returns:
+        A randomly selected emoji
+    """
     return random.choice(emoji_list)
 
-def validate_file_size(file_path):
-    """Validate if file size is within acceptable limits."""
+def validate_file_size(file_path: str, max_size_mb: float = MAX_FILE_SIZE_MB) -> None:
+    """Validate if file size is within acceptable limits.
+    
+    Args:
+        file_path: Path to the file to check
+        max_size_mb: Maximum allowed file size in MB
+        
+    Raises:
+        ValueError: If file size exceeds maximum allowed size
+    """
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    if file_size_mb > MAX_FILE_SIZE_MB:
-        raise ValueError(f"File size ({file_size_mb:.2f}MB) exceeds maximum allowed size ({MAX_FILE_SIZE_MB}MB)")
-    return True
+    if file_size_mb > max_size_mb:
+        raise ValueError(
+            f"File size ({file_size_mb:.2f}MB) exceeds maximum allowed size ({max_size_mb}MB)"
+        )
 
-def get_user_input_name():
-    """Prompts the user for a spreadsheet name."""
+def get_user_input_name() -> str:
+    """Prompt the user for a spreadsheet name.
+    
+    Returns:
+        User provided spreadsheet name
+    """
     logger.info(f"\n{get_random_emoji(WORKING_EMOJIS)} Please enter a name for your spreadsheet:")
     while True:
         name = input().strip()
@@ -81,50 +113,65 @@ def get_user_input_name():
             return name
         logger.error(f"{get_random_emoji(ERROR_EMOJIS)} Name cannot be empty. Please try again:")
 
-def get_credentials():
-    """Gets valid user credentials from storage or initiates OAuth2 flow."""
-    creds = None
+def get_credentials() -> Credentials:
+    """Get valid user credentials from storage or initiate OAuth2 flow.
     
+    Returns:
+        Valid Google OAuth2 credentials
+        
+    Raises:
+        SystemExit: If credentials.json is missing
+    """
     # Check if credentials.json exists
     if not os.path.exists(CREDENTIALS_FILE):
         logger.error(f"Missing {CREDENTIALS_FILE}. Please obtain credentials from Google Cloud Console.")
         sys.exit(1)
     
-    # The file token.pickle stores the user's access and refresh tokens
-    if os.path.exists(TOKEN_FILE):
-        try:
-            with open(TOKEN_FILE, 'rb') as token:
-                creds = pickle.load(token)
-        except Exception as e:
-            logger.error(f"Error reading token file: {e}")
-            os.remove(TOKEN_FILE)  # Remove corrupted token file
-            return get_credentials()  # Retry authentication
-    
-    # If there are no (valid) credentials available, let the user log in
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
+    while True:
+        creds = None
+        # The file token.pickle stores the user's access and refresh tokens
+        if os.path.exists(TOKEN_FILE):
             try:
-                creds.refresh(Request())
+                with open(TOKEN_FILE, 'rb') as token:
+                    creds = pickle.load(token)
             except Exception as e:
-                logger.error(f"Error refreshing credentials: {e}")
-                os.remove(TOKEN_FILE)  # Remove invalid token file
-                return get_credentials()  # Retry authentication
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-            creds = flow.run_local_server(port=0)
+                logger.error(f"Error reading token file: {e}")
+                os.remove(TOKEN_FILE)
+                continue
         
-        # Save the credentials for the next run
-        try:
-            with open(TOKEN_FILE, 'wb') as token:
-                pickle.dump(creds, token)
-            secure_file_permissions(TOKEN_FILE)
-        except Exception as e:
-            logger.error(f"Error saving credentials: {e}")
-    
-    return creds
+        # If there are no (valid) credentials available, let the user log in
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                except Exception as e:
+                    logger.error(f"Error refreshing credentials: {e}")
+                    os.remove(TOKEN_FILE)
+                    continue
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+                creds = flow.run_local_server(port=0)
+            
+            # Save the credentials for the next run
+            try:
+                with open(TOKEN_FILE, 'wb') as token:
+                    pickle.dump(creds, token)
+                secure_file_permissions(TOKEN_FILE)
+            except Exception as e:
+                logger.error(f"Error saving credentials: {e}")
+                # Continue even if we couldn't save the token
+        
+        return creds
 
-def create_spreadsheet(service):
-    """Creates a new Google Spreadsheet by copying the template."""
+def create_spreadsheet(service: Any) -> Optional[str]:
+    """Create a new Google Spreadsheet by copying the template.
+    
+    Args:
+        service: Google Sheets API service instance
+        
+    Returns:
+        The ID of the created spreadsheet, or None if creation failed
+    """
     try:
         base_name = get_user_input_name()
         current_date = datetime.now().strftime("%d%m%Y")
@@ -144,8 +191,46 @@ def create_spreadsheet(service):
         logger.error(f"\n{get_random_emoji(ERROR_EMOJIS)} Error creating spreadsheet: {error}")
         return None
 
-def import_csv_to_sheet(service, spreadsheet_id, csv_file, retry_count=0):
-    """Imports a CSV file into a new sheet in the spreadsheet."""
+def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean and prepare DataFrame for Google Sheets import.
+    
+    Args:
+        df: Input DataFrame to clean
+        
+    Returns:
+        Cleaned DataFrame
+    """
+    if df.empty or (len(df) == 1 and df.iloc[0].str.contains('NO RECORDS').any()):
+        return pd.DataFrame([["NO RECORDS"]])
+    
+    df = df.fillna('')
+    
+    def clean_value(val: Any) -> str:
+        if pd.isna(val):
+            return ''
+        val_str = str(val).strip()
+        val_str = val_str.replace('\x00', '').replace('\r', '').replace('\n', ' ')
+        return val_str
+    
+    return df.apply(lambda x: x.map(clean_value))
+
+def import_csv_to_sheet(
+    service: Any,
+    spreadsheet_id: str,
+    csv_file: str,
+    retry_count: int = 0
+) -> bool:
+    """Import a CSV file into a new sheet in the spreadsheet.
+    
+    Args:
+        service: Google Sheets API service instance
+        spreadsheet_id: ID of the target spreadsheet
+        csv_file: Path to the CSV file to import
+        retry_count: Number of retries attempted so far
+        
+    Returns:
+        True if import was successful, False otherwise
+    """
     try:
         # Validate file size before processing
         validate_file_size(csv_file)
@@ -159,21 +244,11 @@ def import_csv_to_sheet(service, spreadsheet_id, csv_file, retry_count=0):
             except UnicodeDecodeError:
                 df = pd.read_csv(csv_file, encoding='latin-1', on_bad_lines='skip')
         
-        if df.empty or (len(df) == 1 and df.iloc[0].str.contains('NO RECORDS').any()):
-            df = pd.DataFrame([["NO RECORDS"]])
-        
-        df = df.fillna('')
-        
-        def clean_value(val):
-            if pd.isna(val):
-                return ''
-            val_str = str(val).strip()
-            val_str = val_str.replace('\x00', '').replace('\r', '').replace('\n', ' ')
-            return val_str
-        
-        df = df.apply(lambda x: x.map(clean_value))
+        df = _clean_dataframe(df)
         
         sheet_name = os.path.splitext(os.path.basename(csv_file))[0]
+        
+        # Create new sheet
         body = {
             'requests': [{
                 'addSheet': {
@@ -185,17 +260,16 @@ def import_csv_to_sheet(service, spreadsheet_id, csv_file, retry_count=0):
         }
         
         time.sleep(REQUEST_DELAY)
-        
         service.spreadsheets().batchUpdate(
             spreadsheetId=spreadsheet_id,
             body=body
         ).execute()
         
+        # Update sheet with data
         values = [df.columns.values.tolist()] + df.values.tolist()
         body = {'values': values}
         
         time.sleep(REQUEST_DELAY)
-        
         service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
             range=f'{sheet_name}!A1',
@@ -204,6 +278,7 @@ def import_csv_to_sheet(service, spreadsheet_id, csv_file, retry_count=0):
         ).execute()
         
         return True
+        
     except HttpError as error:
         if error.resp.status == 429 and retry_count < MAX_RETRIES:
             retry_delay = (2 ** retry_count) * 30
@@ -216,8 +291,20 @@ def import_csv_to_sheet(service, spreadsheet_id, csv_file, retry_count=0):
         logger.error(f"\n{get_random_emoji(ERROR_EMOJIS)} Error processing {csv_file}: {e}")
         return False
 
-def update_summary_sheet(service, spreadsheet_id, csv_files, successful_imports):
-    """Updates the first sheet with summary of imported files and row counts."""
+def update_summary_sheet(
+    service: Any,
+    spreadsheet_id: str,
+    csv_files: list[str],
+    successful_imports: list[str]
+) -> None:
+    """Update the first sheet with summary of imported files and row counts.
+    
+    Args:
+        service: Google Sheets API service instance
+        spreadsheet_id: ID of the target spreadsheet
+        csv_files: List of CSV files that were processed
+        successful_imports: List of CSV files that were successfully imported
+    """
     try:
         # Get the first sheet's title
         sheet_metadata = service.spreadsheets().get(
@@ -248,26 +335,23 @@ def update_summary_sheet(service, spreadsheet_id, csv_files, successful_imports)
     except Exception as e:
         logger.error(f"\n{get_random_emoji(ERROR_EMOJIS)} Error updating summary: {e}")
 
-def main():
-    logger.info(f"\n{get_random_emoji(WORKING_EMOJIS)} Starting up the CSV to Google Sheets importer...")
-    
+def setup_workspace() -> None:
+    """Set up the workspace with necessary files and permissions."""
     # Create .gitignore if it doesn't exist
     gitignore_file = '.gitignore'
-    gitignore_entries = set(['token.pickle', 'credentials.json', 'import_log.txt'])
+    gitignore_entries = {'token.pickle', 'credentials.json', 'import_log.txt'}
     
     try:
+        existing_entries = set()
         if os.path.exists(gitignore_file):
             with open(gitignore_file, 'r') as f:
                 existing_entries = set(f.read().splitlines())
-        else:
-            existing_entries = set()
         
         # Add missing entries to .gitignore
         missing_entries = gitignore_entries - existing_entries
         if missing_entries:
             with open(gitignore_file, 'a') as f:
-                for entry in missing_entries:
-                    f.write(f'\n{entry}')
+                f.write('\n'.join(missing_entries) + '\n')
     except Exception as e:
         logger.warning(f"Could not update .gitignore: {e}")
     
@@ -276,10 +360,16 @@ def main():
         if os.path.exists(file):
             secure_file_permissions(file)
     
-    if not os.path.exists('csv_files'):
-        os.makedirs('csv_files')
+    # Create csv_files directory if it doesn't exist
+    os.makedirs('csv_files', exist_ok=True)
+    if not any(f.endswith('.csv') for f in os.listdir('csv_files')):
         logger.info(f"\n{get_random_emoji(WORKING_EMOJIS)} Created 'csv_files' directory. Please place your CSV files there.")
-        return
+
+def main() -> None:
+    """Main entry point for the CSV to Google Sheets importer."""
+    logger.info(f"\n{get_random_emoji(WORKING_EMOJIS)} Starting up the CSV to Google Sheets importer...")
+    
+    setup_workspace()
     
     csv_files = [f for f in os.listdir('csv_files') if f.endswith('.csv')]
     total_files = len(csv_files)
