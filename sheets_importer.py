@@ -14,7 +14,8 @@ import sys
 import time
 import warnings
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, Callable, TypeVar
+from functools import wraps
 
 # Third-party imports
 import pandas as pd
@@ -40,10 +41,6 @@ SCOPES = [
 CREDENTIALS_FILE = 'credentials.json'
 TOKEN_FILE = 'token.pickle'
 
-SUCCESS_EMOJIS = ['🎉', '✨', '🌟', '🚀', '💫', '🎯', '🌈']
-WORKING_EMOJIS = ['🔨', '⚙️', '🛠️', '🔧', '💪', '🤖', '🔄']
-ERROR_EMOJIS = ['😱', '🚨', '💥', '⚡', '🆘', '😅', '🤔']
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -61,6 +58,35 @@ logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.ERROR)
 # Suppress the file_cache warning
 warnings.filterwarnings('ignore', message='file_cache is only supported with oauth2client<4.0.0')
 
+T = TypeVar('T')
+
+def retry_on_rate_limit(max_retries: int = MAX_RETRIES) -> Callable:
+    """Decorator to retry functions on rate limit errors with exponential backoff.
+    
+    Args:
+        max_retries: Maximum number of retry attempts
+        
+    Returns:
+        Decorated function
+    """
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> T:
+            retry_count = 0
+            while True:
+                try:
+                    return func(*args, **kwargs)
+                except HttpError as error:
+                    if error.resp.status == 429 and retry_count < max_retries:
+                        retry_delay = (2 ** retry_count) * 30
+                        logger.warning(f"⏳ Rate limit reached. Waiting {retry_delay} seconds before retry...")
+                        time.sleep(retry_delay)
+                        retry_count += 1
+                        continue
+                    raise
+        return wrapper
+    return decorator
+
 def secure_file_permissions(filepath: str) -> None:
     """Set secure permissions for sensitive files.
     
@@ -71,18 +97,7 @@ def secure_file_permissions(filepath: str) -> None:
         # Set file permissions to owner read/write only (600)
         os.chmod(filepath, stat.S_IRUSR | stat.S_IWUSR)
     except Exception as e:
-        logger.warning(f"Could not set permissions for {filepath}: {e}")
-
-def get_random_emoji(emoji_list: list[str]) -> str:
-    """Get a random emoji from the provided list.
-    
-    Args:
-        emoji_list: List of emoji strings to choose from
-        
-    Returns:
-        A randomly selected emoji
-    """
-    return random.choice(emoji_list)
+        logger.warning(f"⚠️ Could not set permissions for {filepath}: {e}")
 
 def validate_file_size(file_path: str, max_size_mb: float = MAX_FILE_SIZE_MB) -> None:
     """Validate if file size is within acceptable limits.
@@ -106,12 +121,12 @@ def get_user_input_name() -> str:
     Returns:
         User provided spreadsheet name
     """
-    logger.info(f"\n{get_random_emoji(WORKING_EMOJIS)} Please enter a name for your spreadsheet:")
+    logger.info("✏️ Please enter a name for your spreadsheet:")
     while True:
         name = input().strip()
         if name:
             return name
-        logger.error(f"{get_random_emoji(ERROR_EMOJIS)} Name cannot be empty. Please try again:")
+        logger.error("❌ Name cannot be empty. Please try again:")
 
 def get_credentials() -> Credentials:
     """Get valid user credentials from storage or initiate OAuth2 flow.
@@ -122,9 +137,8 @@ def get_credentials() -> Credentials:
     Raises:
         SystemExit: If credentials.json is missing
     """
-    # Check if credentials.json exists
     if not os.path.exists(CREDENTIALS_FILE):
-        logger.error(f"Missing {CREDENTIALS_FILE}. Please obtain credentials from Google Cloud Console.")
+        logger.error("🔒 Missing credentials.json. Please obtain credentials from Google Cloud Console.")
         sys.exit(1)
     
     while True:
@@ -135,7 +149,7 @@ def get_credentials() -> Credentials:
                 with open(TOKEN_FILE, 'rb') as token:
                     creds = pickle.load(token)
             except Exception as e:
-                logger.error(f"Error reading token file: {e}")
+                logger.error(f"📛 Error reading token file: {e}")
                 os.remove(TOKEN_FILE)
                 continue
         
@@ -145,7 +159,7 @@ def get_credentials() -> Credentials:
                 try:
                     creds.refresh(Request())
                 except Exception as e:
-                    logger.error(f"Error refreshing credentials: {e}")
+                    logger.error(f"🔒 Error refreshing credentials: {e}")
                     os.remove(TOKEN_FILE)
                     continue
             else:
@@ -158,7 +172,7 @@ def get_credentials() -> Credentials:
                     pickle.dump(creds, token)
                 secure_file_permissions(TOKEN_FILE)
             except Exception as e:
-                logger.error(f"Error saving credentials: {e}")
+                logger.error(f"📛 Error saving credentials: {e}")
                 # Continue even if we couldn't save the token
         
         return creds
@@ -185,10 +199,10 @@ def create_spreadsheet(service: Any) -> Optional[str]:
             body={'name': copy_title}
         ).execute()
         
-        logger.info(f"\n{get_random_emoji(SUCCESS_EMOJIS)} Created new spreadsheet '{copy_title}' with ID: {copied_file['id']}")
+        logger.info(f"✨ Created new spreadsheet '{copy_title}' with ID: {copied_file['id']}")
         return copied_file['id']
     except HttpError as error:
-        logger.error(f"\n{get_random_emoji(ERROR_EMOJIS)} Error creating spreadsheet: {error}")
+        logger.error(f"💥 Error creating spreadsheet: {error}")
         return None
 
 def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -214,11 +228,11 @@ def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     
     return df.apply(lambda x: x.map(clean_value))
 
+@retry_on_rate_limit()
 def import_csv_to_sheet(
     service: Any,
     spreadsheet_id: str,
-    csv_file: str,
-    retry_count: int = 0
+    csv_file: str
 ) -> bool:
     """Import a CSV file into a new sheet in the spreadsheet.
     
@@ -226,7 +240,6 @@ def import_csv_to_sheet(
         service: Google Sheets API service instance
         spreadsheet_id: ID of the target spreadsheet
         csv_file: Path to the CSV file to import
-        retry_count: Number of retries attempted so far
         
     Returns:
         True if import was successful, False otherwise
@@ -245,7 +258,6 @@ def import_csv_to_sheet(
                 df = pd.read_csv(csv_file, encoding='latin-1', on_bad_lines='skip')
         
         df = _clean_dataframe(df)
-        
         sheet_name = os.path.splitext(os.path.basename(csv_file))[0]
         
         # Create new sheet
@@ -279,16 +291,8 @@ def import_csv_to_sheet(
         
         return True
         
-    except HttpError as error:
-        if error.resp.status == 429 and retry_count < MAX_RETRIES:
-            retry_delay = (2 ** retry_count) * 30
-            logger.warning(f"\n{get_random_emoji(WORKING_EMOJIS)} Rate limit reached. Waiting {retry_delay} seconds before retry...")
-            time.sleep(retry_delay)
-            return import_csv_to_sheet(service, spreadsheet_id, csv_file, retry_count + 1)
-        logger.error(f"\n{get_random_emoji(ERROR_EMOJIS)} Error processing {csv_file}: {error}")
-        return False
     except Exception as e:
-        logger.error(f"\n{get_random_emoji(ERROR_EMOJIS)} Error processing {csv_file}: {e}")
+        logger.error(f"❌ Error processing {csv_file}: {e}")
         return False
 
 def update_summary_sheet(
@@ -331,9 +335,9 @@ def update_summary_sheet(
                 body={'values': summary_data}
             ).execute()
             
-            logger.info(f"{get_random_emoji(SUCCESS_EMOJIS)} Added summary to the first sheet")
+            logger.info("📊 Added summary to the first sheet")
     except Exception as e:
-        logger.error(f"\n{get_random_emoji(ERROR_EMOJIS)} Error updating summary: {e}")
+        logger.error(f"❌ Error updating summary: {e}")
 
 def setup_workspace() -> None:
     """Set up the workspace with necessary files and permissions."""
@@ -353,7 +357,7 @@ def setup_workspace() -> None:
             with open(gitignore_file, 'a') as f:
                 f.write('\n'.join(missing_entries) + '\n')
     except Exception as e:
-        logger.warning(f"Could not update .gitignore: {e}")
+        logger.warning(f"⚠️ Could not update .gitignore: {e}")
     
     # Secure sensitive files
     for file in [CREDENTIALS_FILE, TOKEN_FILE]:
@@ -363,11 +367,11 @@ def setup_workspace() -> None:
     # Create csv_files directory if it doesn't exist
     os.makedirs('csv_files', exist_ok=True)
     if not any(f.endswith('.csv') for f in os.listdir('csv_files')):
-        logger.info(f"\n{get_random_emoji(WORKING_EMOJIS)} Created 'csv_files' directory. Please place your CSV files there.")
+        logger.info("📁 Created 'csv_files' directory. Please place your CSV files there.")
 
 def main() -> None:
     """Main entry point for the CSV to Google Sheets importer."""
-    logger.info(f"\n{get_random_emoji(WORKING_EMOJIS)} Starting up the CSV to Google Sheets importer...")
+    logger.info("🚀 Starting CSV to Sheets importer")
     
     setup_workspace()
     
@@ -375,12 +379,11 @@ def main() -> None:
     total_files = len(csv_files)
     
     if not csv_files:
-        logger.error(f"\n{get_random_emoji(ERROR_EMOJIS)} No CSV files found in 'csv_files' directory!")
+        logger.error("❌ No CSV files found in csv_files/")
         return
     
-    logger.info(f"\n{get_random_emoji(WORKING_EMOJIS)} Found {total_files} CSV files to process!")
-    
-    logger.info(f"\n{get_random_emoji(WORKING_EMOJIS)} Authenticating with Google Sheets API...")
+    logger.info(f"📁 Found {total_files} CSV files")
+    logger.info("🔑 Authenticating...")
     creds = get_credentials()
     
     try:
@@ -389,12 +392,11 @@ def main() -> None:
         if not spreadsheet_id:
             return
 
-        logger.info(f"\n{get_random_emoji(WORKING_EMOJIS)} Starting to import CSV files...")
+        logger.info("📥 Importing files...")
         
         successful_imports = []
         for index, csv_file in enumerate(csv_files, 1):
-            working_emoji = get_random_emoji(WORKING_EMOJIS)
-            logger.info(f"\n{working_emoji} Processing file {index} of {total_files}: {csv_file}")
+            logger.info(f"⏳ [{index}/{total_files}] {csv_file}")
             
             success = import_csv_to_sheet(
                 service,
@@ -404,7 +406,7 @@ def main() -> None:
             
             if success:
                 successful_imports.append(csv_file)
-                logger.info(f"{get_random_emoji(SUCCESS_EMOJIS)} Successfully imported {csv_file} ({len(successful_imports)} of {total_files} done)")
+                logger.info(f"✅ Imported {csv_file}")
             
             if index < len(csv_files):
                 time.sleep(FILE_DELAY)
@@ -412,14 +414,14 @@ def main() -> None:
         # Update the first sheet with summary
         update_summary_sheet(service, spreadsheet_id, csv_files, successful_imports)
         
-        logger.info(f"\n{get_random_emoji(SUCCESS_EMOJIS)} Import complete!")
-        logger.info(f"✓ Successfully imported {len(successful_imports)} of {total_files} files")
-        if len(successful_imports) < total_files:
-            logger.warning(f"✗ Failed to import {total_files - len(successful_imports)} files")
-        logger.info(f"📊 Your spreadsheet is ready at: https://docs.google.com/spreadsheets/d/{spreadsheet_id}")
+        success_count = len(successful_imports)
+        logger.info(f"\n✨ Import complete: {success_count}/{total_files} files")
+        if success_count < total_files:
+            logger.warning(f"⚠️ Failed to import {total_files - success_count} files")
+        logger.info(f"📊 Spreadsheet: https://docs.google.com/spreadsheets/d/{spreadsheet_id}")
         
     except HttpError as error:
-        logger.error(f"\n{get_random_emoji(ERROR_EMOJIS)} An error occurred: {error}")
+        logger.error(f"💥 Error: {error}")
 
 if __name__ == '__main__':
     main() 
