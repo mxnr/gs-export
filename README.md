@@ -19,9 +19,11 @@ git clone <your-repo-url>
 cd <repo-directory>
 ```
 
-2. Install dependencies:
+2. Create a virtual environment and install dependencies:
 ```bash
-pip install -r requirements.txt
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
 3. Set up Google Sheets API:
@@ -38,26 +40,38 @@ pip install -r requirements.txt
 
 ## Usage
 
-1. Place your CSV files in the `csv_files` directory
+Run these commands from the repository root:
 
-2. Run the script:
 ```bash
-python sheets_importer.py
+venv/bin/python sheets_importer.py
 ```
 
-3. Follow the prompts to:
-   - Authenticate with Google (first time only)
-   - Enter a name for the new spreadsheet
+Before running:
+
+1. Place your CSV files in the `csv_files` directory.
+2. Make sure `config.py` and `credentials.json` exist (see Setup).
+3. Follow the prompt to authenticate with Google, if needed, and enter a name for the new spreadsheet.
+
+The saved login in `token.pickle` is reused on later runs.
 
 The script will:
-- Create a new spreadsheet
+
+- Copy the configured template to a new spreadsheet
 - Import each CSV file into a separate sheet
 - Show progress with emoji indicators
 - Log all operations to `import_log.txt`
 
+Alternatively, activate the environment first:
+
+```bash
+source venv/bin/activate
+python sheets_importer.py
+```
+
 ## Configuration
 
 Edit `config.py` to customize:
+
 - `TEMPLATE_SPREADSHEET_ID`: ID of your template spreadsheet
 - `MAX_FILE_SIZE_MB`: Maximum allowed CSV file size
 - `REQUEST_DELAY`: Delay between API requests
@@ -81,4 +95,4 @@ Edit `config.py` to customize:
 - Automatic retry for rate limit errors
 - Multiple encoding support for CSV files
 - Validation of file sizes and formats
-- Detailed error messages and logging 
+- Detailed error messages and logging
